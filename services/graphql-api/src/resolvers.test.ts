@@ -77,7 +77,7 @@ describe("BAD_USER_INPUT reaches clients", () => {
   it("valid input returns data and no errors", async () => {
     const response = await server.executeOperation({
       query:
-        "mutation { setAlertConfig(poolId: \"pool-ok\", metric: \"price_deviation\", thresholdBps: 50) { poolId metric thresholdBps } }",
+        "mutation { setAlertConfig(poolId: \"pool-ok\", metric: \"price_deviation\", thresholdBps: 50) { poolId metric comparison thresholdBps } }",
     });
     assert.equal(response.body.kind, "single");
     if (response.body.kind !== "single") return;
@@ -85,7 +85,20 @@ describe("BAD_USER_INPUT reaches clients", () => {
     // Compare the serialized form a client receives; graphql-js builds the
     // result from null-prototype objects.
     assert.deepEqual(JSON.parse(JSON.stringify(response.body.singleResult.data)), {
-      setAlertConfig: { poolId: "pool-ok", metric: "price_deviation", thresholdBps: 50 },
+      setAlertConfig: { poolId: "pool-ok", metric: "price_deviation", comparison: "above", thresholdBps: 50 },
+    });
+  });
+
+  it("accepts and returns a below comparison", async () => {
+    const response = await server.executeOperation({
+      query:
+        "mutation { setAlertConfig(poolId: \"pool-below\", metric: \"tvl\", comparison: \"below\", thresholdValue: 500) { poolId comparison thresholdValue } }",
+    });
+    assert.equal(response.body.kind, "single");
+    if (response.body.kind !== "single") return;
+    assert.equal(response.body.singleResult.errors, undefined);
+    assert.deepEqual(JSON.parse(JSON.stringify(response.body.singleResult.data)), {
+      setAlertConfig: { poolId: "pool-below", comparison: "below", thresholdValue: 500 },
     });
   });
 });

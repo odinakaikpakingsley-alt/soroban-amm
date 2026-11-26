@@ -858,9 +858,11 @@ describe("local webhook delivery integration", () => {
                     failureThreshold: 1,
                     cooldownMs: 60_000,
                 });
+                const dlq = new DeadLetterQueue(10);
                 const d = makeDispatcher(reg, {
                     maxRetries: 0,
                     circuitBreaker: cb,
+                    deadLetterQueue: dlq,
                 });
 
                 await d.dispatch(EVENT);
@@ -869,12 +871,98 @@ describe("local webhook delivery integration", () => {
 
                 const [second] = await d.dispatch(EVENT);
                 assert.equal(second.failureKind, "circuit_open");
+                assert.equal(second.deadLettered, true);
                 assert.equal(
                     srv.hits(),
                     hitsAfterFirst,
                     "no request should be sent while open",
                 );
                 assert.equal(d.metrics().shortCircuited, 1);
+                assert.equal(d.metrics().deadLettered, 2);
+                const skipped = dlq.get(second.deadLetterId!);
+                assert.equal(skipped?.reason, "circuit open");
+            } finally {
+                await srv.close();
+            }
+        });
+
+        it("retains circuit-open skips in the dead-letter queue", async () => {
+            const srv = await startServer(() => ({ status: 200 }));
+            try {
+                const reg = new WebhookRegistry();
+                const sub = reg.register(srv.url);
+                const dlq = new DeadLetterQueue(10);
+                const cb = new CircuitBreaker({
+                    failureThreshold: 1,
+                    cooldownMs: 60_000,
+                });
+                cb.recordFailure(sub.id);
+                const d = makeDispatcher(reg, {
+                    maxRetries: 0,
+                    circuitBreaker: cb,
+                    deadLetterQueue: dlq,
+                });
+
+                const [skipped] = await d.dispatch({ ...EVENT, id: "circuit-open-retained" });
+                const retained = dlq.get(skipped.deadLetterId!);
+                assert.equal(skipped.deadLettered, true);
+                assert.equal(retained?.event.id, "circuit-open-retained");
+                assert.equal(retained?.reason, "circuit open");
+                assert.equal(srv.hits(), 0);
+            } finally {
+                await srv.close();
+            }
+        });
+
+        it("replays a circuit-open dead letter after the cooldown", async () => {
+            let recovered = false;
+            let now = 1_000;
+            const srv = await startServer(() => ({ status: recovered ? 200 : 500 }));
+            try {
+                const reg = new WebhookRegistry();
+                const sub = reg.register(srv.url);
+                const dlq = new DeadLetterQueue(10);
+                const cb = new CircuitBreaker({
+                    failureThreshold: 1,
+                    cooldownMs: 500,
+                    now: () => now,
+                });
+                cb.recordFailure(sub.id);
+                const d = makeDispatcher(reg, {
+                    maxRetries: 0,
+                    circuitBreaker: cb,
+                    deadLetterQueue: dlq,
+                });
+                const [skipped] = await d.dispatch({ ...EVENT, id: "circuit-open-replay" });
+                assert.ok(dlq.get(skipped.deadLetterId!));
+
+                recovered = true;
+                now += 500;
+                const replayed = await d.replay(skipped.deadLetterId!);
+                assert.equal(replayed?.success, true);
+                assert.equal(dlq.get(skipped.deadLetterId!), undefined);
+                assert.equal(cb.stateOf(sub.id), "closed");
+            } finally {
+                await srv.close();
+            }
+        });
+
+        it("counts circuit-open skips in the short-circuit and dead-letter metrics", async () => {
+            const srv = await startServer(() => ({ status: 200 }));
+            try {
+                const reg = new WebhookRegistry();
+                const sub = reg.register(srv.url);
+                const cb = new CircuitBreaker({ failureThreshold: 1, cooldownMs: 60_000 });
+                cb.recordFailure(sub.id);
+                const d = makeDispatcher(reg, {
+                    circuitBreaker: cb,
+                    deadLetterQueue: new DeadLetterQueue(10),
+                });
+                await d.dispatch({ ...EVENT, id: "circuit-open-metrics" });
+
+                assert.equal(d.metrics().shortCircuited, 1);
+                assert.equal(d.metrics().deadLettered, 1);
+                assert.equal(d.metrics().failed, 1);
             } finally {
                 await srv.close();
             }

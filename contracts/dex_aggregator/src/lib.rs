@@ -448,6 +448,9 @@ impl DexAggregator {
         quoted_out: i128,
     ) -> bool {
         Self::extend_ttl(&env);
+        if quoted_out < 0 {
+            return false;
+        }
         let max_hops: u32 = env
             .storage()
             .instance()
@@ -457,7 +460,7 @@ impl DexAggregator {
         else {
             return quoted_out == 0;
         };
-        if best.amount_out == 0 {
+        if best.amount_out <= 0 {
             return quoted_out == 0;
         }
         let diff = if best.amount_out >= quoted_out {
@@ -465,8 +468,14 @@ impl DexAggregator {
         } else {
             quoted_out - best.amount_out
         };
-        let observed_bps = diff * Self::BPS / best.amount_out;
-        if observed_bps > Self::PRICE_TOLERANCE_BPS {
+        let tolerance_denominator = Self::BPS / Self::PRICE_TOLERANCE_BPS;
+        if diff > best.amount_out / tolerance_denominator {
+            let observed_bps = diff
+                .checked_mul(Self::BPS)
+                .map(|scaled_diff| {
+                    (scaled_diff / best.amount_out).max(Self::PRICE_TOLERANCE_BPS + 1)
+                })
+                .unwrap_or(i128::MAX);
             soroban_amm_sdk::emit_versioned_event!(
                 &env,
                 (symbol_short!("tol_fail"),),
@@ -1021,6 +1030,7 @@ mod tests {
 
         // A bool-returning query must degrade gracefully rather than trap.
         assert!(!agg.is_price_within_tolerance(&a, &b, &100_i128, &1_i128));
+        assert!(agg.is_price_within_tolerance(&a, &b, &100_i128, &0_i128));
     }
 
     #[test]
@@ -1458,6 +1468,46 @@ mod tests {
         ));
 
         assert_eq!(count_events(&v.env, &v.agg, symbol_short!("tol_fail")), 0);
+    }
+
+    #[test]
+    fn test_tolerance_rejects_zero_and_i128_max_without_trapping() {
+        let v = setup_venues();
+        let agg = DexAggregatorClient::new(&v.env, &v.agg);
+        assert!(!agg.is_price_within_tolerance(
+            &v.token_a,
+            &v.token_b,
+            &10_000_i128,
+            &0_i128
+        ));
+        assert!(!agg.is_price_within_tolerance(
+            &v.token_a,
+            &v.token_b,
+            &10_000_i128,
+            &i128::MAX
+        ));
+    }
+
+    #[test]
+    fn test_tolerance_includes_exact_boundary_and_rejects_one_unit_beyond() {
+        let v = setup_venues();
+        let agg = DexAggregatorClient::new(&v.env, &v.agg);
+        let best = agg.find_best_route(&v.token_a, &v.token_b, &10_000_i128, &2u32);
+        let max_diff = best.amount_out * DexAggregator::PRICE_TOLERANCE_BPS
+            / DexAggregator::BPS;
+        let at_boundary = best.amount_out - max_diff;
+        assert!(agg.is_price_within_tolerance(
+            &v.token_a,
+            &v.token_b,
+            &10_000_i128,
+            &at_boundary
+        ));
+        assert!(!agg.is_price_within_tolerance(
+            &v.token_a,
+            &v.token_b,
+            &10_000_i128,
+            &(at_boundary - 1)
+        ));
     }
 
     #[test]
